@@ -15,7 +15,7 @@ use enshwick::i18n::{Language, Texts};
 use enshwick::world::World;
 use enshwick::{Load, Off};
 
-use crate::access::{ACCESS, AllowOutcome, Cell, Safe, Seen, centre, nearest_own};
+use crate::access::{AllowOutcome, Cell, Safe, Seen, centre, nearest_own, snapshots};
 
 /// How far from the player their Safe may be, in metres; `texts.toml` says
 /// "4 m" in its replies.
@@ -103,7 +103,7 @@ fn at_hand(world: World, ask: &Ask<'_>) -> Result<Subject, String> {
         key: me.key,
         admin: me.is_admin(),
     };
-    if let Some((at, safe)) = ACCESS.nearest_managed(seen, me.entity, position, REACH) {
+    if let Some((at, safe)) = snapshots().nearest_managed(seen, me.entity, position, REACH) {
         let say = |key: &str, values: &[(&str, &str)]| ask.say(key, values);
         let label = ask.say(
             "action.subject",
@@ -113,7 +113,7 @@ fn at_hand(world: World, ask: &Ask<'_>) -> Result<Subject, String> {
     }
     // An own Safe in reach that another mod's link keeps them from.
     Err(
-        match nearest_own(&ACCESS.owners.load(), me.key, position, REACH) {
+        match nearest_own(&snapshots().owners.load(), me.key, position, REACH) {
             Some(own) => ask.say("command.refused", &[("at", &place(own))]),
             None => ask.say("command.no_safe", &[]),
         },
@@ -123,7 +123,7 @@ fn at_hand(world: World, ask: &Ask<'_>) -> Result<Subject, String> {
 /// The Safe a request acts on, its cell and record as they stand now.
 fn safe_of(request: &Request<'_>) -> Option<(Cell, Safe)> {
     let at = unpack(request.subject?.id);
-    Some((at, ACCESS.owners.load().get(&at)?.clone()))
+    Some((at, snapshots().owners.load().get(&at)?.clone()))
 }
 
 /// Switches a player on or off at the Safe at hand.
@@ -142,7 +142,7 @@ fn access(request: &Request<'_>, save: &impl Fn()) -> Outcome {
         ("at", here.as_str()),
     ];
     if !on {
-        return match ACCESS.change(at, |safe| safe.deny_key(*key)).flatten() {
+        return match snapshots().change(at, |safe| safe.deny_key(*key)).flatten() {
             Some(gone) => {
                 save();
                 Outcome::done(request.say(
@@ -156,7 +156,7 @@ fn access(request: &Request<'_>, save: &impl Fn()) -> Outcome {
     if *key == request.player.key {
         return Outcome::refused(request.say("command.self", &[]));
     }
-    match ACCESS.change(at, |safe| safe.allow(*key, name)) {
+    match snapshots().change(at, |safe| safe.allow(*key, name)) {
         Some(AllowOutcome::Allowed) => {
             save();
             Outcome::done(request.say("command.allowed", &values))
@@ -208,12 +208,16 @@ pub fn declare(
             let Some(at) = subject.map(|s| unpack(s.id)) else {
                 return Vec::new();
             };
-            ACCESS.owners.load().get(&at).map_or_else(Vec::new, |safe| {
-                safe.allowed
-                    .iter()
-                    .map(|a| (a.key, a.name.clone()))
-                    .collect()
-            })
+            snapshots()
+                .owners
+                .load()
+                .get(&at)
+                .map_or_else(Vec::new, |safe| {
+                    safe.allowed
+                        .iter()
+                        .map(|a| (a.key, a.name.clone()))
+                        .collect()
+                })
         })
         .help("action.access.help")
         .at(move |ask| at_hand(world, ask))
@@ -239,17 +243,9 @@ mod tests {
     }
 
     #[test]
-    fn every_text_exists_in_all_languages() {
-        let texts = Texts::parse(crate::content::TEXTS).unwrap();
-        let languages: std::collections::BTreeMap<
-            String,
-            std::collections::BTreeMap<String, String>,
-        > = toml::from_str(crate::content::TEXTS).unwrap();
-        for (language, entries) in &languages {
-            for key in languages.values().flat_map(|other| other.keys()) {
-                assert!(entries.contains_key(key), "{key} has no {language}");
-            }
-        }
+    fn every_text_the_actions_say_exists_in_all_languages() -> Result<(), Off> {
+        let texts = Texts::parse(crate::content::TEXTS)?;
+        assert_eq!(texts.untranslated(), []);
         for key in [
             "safe.label",
             "action.access",
@@ -272,5 +268,6 @@ mod tests {
         ] {
             assert!(texts.get(key, Language::FALLBACK).is_some(), "{key}");
         }
+        Ok(())
     }
 }

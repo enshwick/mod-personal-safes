@@ -10,14 +10,16 @@
 //! `safes:access`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, OnceLock};
 
 use arc_swap::ArcSwap;
 use enshwick::ecs::Entity;
 use enshwick::interactions::{Interaction, Kind};
 use enshwick::points::OwnedPoint;
-use enshwick::points::safes::{Access as AccessPoint, SafeAction};
+use enshwick::state::ModLocal;
+
+use crate::points::{Access as AccessPoint, SafeAction};
 
 /// A position in half-metre cells.
 pub type Cell = (i64, i64, i64);
@@ -207,7 +209,7 @@ impl Action {
 }
 
 /// The extension point `safes:access`, once defined.
-pub static POINT: OnceLock<OwnedPoint<AccessPoint>> = OnceLock::new();
+pub static POINT: ModLocal<OwnedPoint<AccessPoint>> = ModLocal::new();
 
 /// Whether `player`, with the character `character`, may do `action` with
 /// `safe`, the chest `chest`: [`permits`] first, then the links of other
@@ -256,8 +258,13 @@ pub struct Access {
     pub unregistered: AtomicBool,
 }
 
-/// The one set of snapshots.
-pub static ACCESS: LazyLock<Access> = LazyLock::new(Access::new);
+static ACCESS: ModLocal<Access> = ModLocal::new();
+
+/// The one set of snapshots of this mod life.
+#[must_use]
+pub fn snapshots() -> &'static Access {
+    ACCESS.get_or_init(Access::new)
+}
 
 impl Access {
     /// No Safes, no players; administrators may open.
@@ -471,12 +478,12 @@ impl Access {
 #[must_use]
 pub fn filter(interaction: &Interaction) -> bool {
     match interaction.kind {
-        Kind::Stock => !ACCESS.refused_seen(interaction.target.0, interaction.player),
-        Kind::Upgrade => ACCESS
+        Kind::Stock => !snapshots().refused_seen(interaction.target.0, interaction.player),
+        Kind::Upgrade => snapshots()
             .owner(interaction.target, interaction.item, interaction.position)
             .is_none(),
-        Kind::Dismantle => ACCESS.allowed(interaction, Action::Remove),
-        _ => ACCESS.allowed(interaction, Action::Use),
+        Kind::Dismantle => snapshots().allowed(interaction, Action::Remove),
+        _ => snapshots().allowed(interaction, Action::Use),
     }
 }
 
@@ -612,7 +619,7 @@ mod tests {
 
     #[test]
     fn interactions_follow_the_rules_of_a_safe() {
-        ACCESS
+        snapshots()
             .players
             .store(Arc::new(HashMap::from([(10, OWNER), (12, STRANGER)])));
         let at = centre((40, 2, 40));
@@ -628,14 +635,14 @@ mod tests {
         let safe = Some(crate::content::SAFE.id());
         // Unknown and not seen yet: open to all.
         assert!(ask(Kind::Open, 12, None));
-        ACCESS.placed(700, (40, 2, 40), OWNER.key, "Ann");
+        snapshots().placed(700, (40, 2, 40), OWNER.key, "Ann");
         assert!(ask(Kind::Open, 10, safe));
         assert!(!ask(Kind::Open, 12, safe));
         assert!(!ask(Kind::Move, 12, None), "known from the session");
         assert!(!ask(Kind::Stock, 12, None));
         assert!(ask(Kind::Dismantle, 10, safe));
         assert!(!ask(Kind::Upgrade, 10, safe), "nobody upgrades a Safe");
-        assert!(ACCESS.removed(700).is_some());
+        assert!(snapshots().removed(700).is_some());
         assert!(ask(Kind::Upgrade, 10, Some(1)), "another piece upgrades");
     }
 }
