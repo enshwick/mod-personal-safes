@@ -15,9 +15,10 @@
 pub mod access;
 pub mod actions;
 pub mod content;
+mod keys;
 pub mod points;
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -101,6 +102,14 @@ fn set_cost(cost: u32) {
     }
 }
 
+/// The name of the owners' store, per world and in the mod-wide file of
+/// earlier versions.
+const OWNERS: &str = "owners";
+/// The mod-wide owners file from before owners were kept per world.
+const SHARED_OWNERS_FILE: &str = "owners.toml";
+/// Where the mod-wide owners file goes once a world took its owners.
+const MOVED_OWNERS_FILE: &str = "owners.toml.moved";
+
 /// The owners as stored: one record per Safe.
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
 struct Owners {
@@ -134,7 +143,7 @@ fn hex(key: u64) -> String {
 }
 
 impl Owners {
-    fn from_map(owners: &HashMap<Cell, Safe>) -> Self {
+    fn from_map(owners: &FxHashMap<Cell, Safe>) -> Self {
         let mut safes: Vec<Record> = owners
             .iter()
             .map(|(&(x, y, z), safe)| Record {
@@ -155,7 +164,7 @@ impl Owners {
         Self { safes }
     }
 
-    fn to_map(&self) -> HashMap<Cell, Safe> {
+    fn to_map(&self) -> FxHashMap<Cell, Safe> {
         self.safes
             .iter()
             .filter_map(|r| {
@@ -201,7 +210,7 @@ fn on_disk() -> Owners {
     if removed.is_empty() {
         return Owners::from_map(&snapshots().owners.load());
     }
-    let mut owners = HashMap::clone(&snapshots().owners.load());
+    let mut owners = FxHashMap::clone(&snapshots().owners.load());
     for (at, safe) in removed.iter() {
         owners.entry(*at).or_insert_with(|| safe.clone());
     }
@@ -244,15 +253,14 @@ fn save(store: &'static WorldStore<Owners>) {
 /// renamed out of the way.
 fn open_world(store: &WorldStore<Owners>, dir: &Path) {
     let mut owners = store.with(Owners::to_map).unwrap_or_default();
-    let shared = dir.join("owners.toml");
+    let shared = dir.join(SHARED_OWNERS_FILE);
     if owners.is_empty() && store.key().is_some() && shared.exists() {
-        match Store::<Owners>::new(dir, "owners").load() {
+        match Store::<Owners>::new(dir, OWNERS).load() {
             Ok(old) => {
                 owners = old.to_map();
                 store.update(|kept| *kept = old);
                 let moved = store.flush().map_err(|e| e.to_string()).and_then(|()| {
-                    std::fs::rename(&shared, dir.join("owners.toml.moved"))
-                        .map_err(|e| e.to_string())
+                    std::fs::rename(&shared, dir.join(MOVED_OWNERS_FILE)).map_err(|e| e.to_string())
                 });
                 match moved {
                     Ok(()) => enshwick::info!(
@@ -300,8 +308,8 @@ impl Mod for PersonalSafes {
         load.add_texts(
             &texts,
             &[
-                ("safe.name", content::SAFE_NAME),
-                ("safe.description", content::SAFE_DESCRIPTION),
+                (keys::SAFE_NAME, content::SAFE_NAME),
+                (keys::SAFE_DESCRIPTION, content::SAFE_DESCRIPTION),
             ],
         )?;
         load.add_item(content::item())?;
@@ -336,7 +344,7 @@ fn guard(load: &mut Load<'_>, phrases: &'static Phrases) -> Result<(), Off> {
     })?;
     // The store opens on the world's load, before the handler below runs.
     let store: &'static WorldStore<Owners> =
-        Box::leak(Box::new(load.world_store::<Owners>("owners")?));
+        Box::leak(Box::new(load.world_store::<Owners>(OWNERS)?));
     let _first = STORE.set(store);
     load.on::<WorldLoaded>(move |()| open_world(store, &dir))?;
 
@@ -361,7 +369,7 @@ fn guard(load: &mut Load<'_>, phrases: &'static Phrases) -> Result<(), Off> {
         load.on::<ShutdownStarted>(|()| {
             removed().clear();
             snapshots().forget_session();
-            snapshots().load_owners(HashMap::new());
+            snapshots().load_owners(FxHashMap::default());
         })?;
         enshwick::info!("the Safe's checks act while this client hosts a game");
     }
@@ -397,7 +405,7 @@ fn placed_safe(world: World, phrases: &Phrases, placed: &BuildingData) {
     let position = placed.position.map(f64::from);
     snapshots().placed(placed.entity, access::cell(position), key, &name);
     if !name.is_empty() {
-        let label = phrases.say("safe.label", &[("owner", &name)]);
+        let label = phrases.say(keys::LABEL, &[(keys::value::OWNER, &name)]);
         if !world.set_label(Entity(placed.entity), &label) {
             enshwick::warn!("Safe {} not labelled", placed.entity);
         }
@@ -468,7 +476,7 @@ fn label_seen(
     phrases: &'static Phrases,
     store: &'static WorldStore<Owners>,
 ) -> Result<(), Off> {
-    let mut done: HashSet<u32> = HashSet::new();
+    let mut done: FxHashSet<u32> = FxHashSet::default();
     let containers = world.component_type(load, "keen::ecs::InventorySetup");
     if let Err(off) = &containers {
         enshwick::warn!("Safes nobody looked at this session lend their stock to crafting: {off}");
@@ -505,7 +513,7 @@ fn label_seen(
             if name.is_empty() {
                 continue;
             }
-            let label = phrases.say("safe.label", &[("owner", &name)]);
+            let label = phrases.say(keys::LABEL, &[(keys::value::OWNER, &name)]);
             if world.set_label(Entity(entity), &label) {
                 done.insert(entity);
             }
@@ -532,7 +540,7 @@ fn seen(player: &enshwick::world::Player) -> Seen {
 
 /// Retakes the players snapshot from the world, on the game thread.
 fn snapshot_players(world: World) {
-    let players: HashMap<u32, Seen> = world
+    let players: FxHashMap<u32, Seen> = world
         .players()
         .iter()
         .map(|p| (p.entity.0, seen(p)))
@@ -554,14 +562,14 @@ fn track_players(load: &mut Load<'_>, world: World) -> Result<(), Off> {
             |p| seen(&p),
         );
         snapshots().players.rcu(|players| {
-            let mut players = HashMap::clone(players);
+            let mut players = FxHashMap::clone(players);
             players.insert(entity.0, player);
             players
         });
     })?;
     load.on::<PlayerLeft>(|left| {
         snapshots().players.rcu(|players| {
-            let mut players = HashMap::clone(players);
+            let mut players = FxHashMap::clone(players);
             players.remove(&left.entity);
             players
         });
@@ -713,7 +721,8 @@ label_language = \"uk\"
     fn owners_survive_the_file_with_keys_past_i64() {
         let mut friendly = Safe::new(5, "Ann");
         friendly.allow(u64::MAX - 1, "Bob Lee");
-        let owners = HashMap::from([((1, -2, 3), Safe::new(u64::MAX, "")), ((0, 0, 0), friendly)]);
+        let owners =
+            FxHashMap::from_iter([((1, -2, 3), Safe::new(u64::MAX, "")), ((0, 0, 0), friendly)]);
         let text = toml::to_string(&Owners::from_map(&owners)).unwrap();
         let back: Owners = toml::from_str(&text).unwrap();
         assert_eq!(back.to_map(), owners);
@@ -725,7 +734,7 @@ label_language = \"uk\"
         let back: Owners = toml::from_str(old).unwrap();
         assert_eq!(
             back.to_map(),
-            HashMap::from([((1, 2, 3), Safe::new(0xff, ""))])
+            FxHashMap::from_iter([((1, 2, 3), Safe::new(0xff, ""))])
         );
     }
 }

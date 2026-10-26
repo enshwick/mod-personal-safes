@@ -219,7 +219,7 @@ label_language = \"en\"
         };
         assert_eq!(status, Status::OK, "{:?}", loader.logs());
         assert_eq!(loader.raise::<WorldLoaded>(&()), 2, "the store and the mod");
-        snapshots().load_owners(std::collections::HashMap::from([(
+        snapshots().load_owners(rustc_hash::FxHashMap::from_iter([(
             (40, 2, 40),
             Safe::new(1, "Ann"),
         )]));
@@ -229,7 +229,7 @@ label_language = \"en\"
         };
         snapshots()
             .players
-            .store(std::sync::Arc::new(std::collections::HashMap::from([(
+            .store(std::sync::Arc::new(rustc_hash::FxHashMap::from_iter([(
                 10, stranger,
             )])));
         let stock = Interaction {
@@ -259,7 +259,7 @@ label_language = \"en\"
 
     #[test]
     fn other_mods_change_who_may_use_a_safe_at_its_point() {
-        use std::collections::HashMap;
+        use rustc_hash::FxHashMap;
         use std::sync::Arc;
 
         use enshwick::ecs::Entity;
@@ -302,9 +302,10 @@ label_language = \"en\"
                 admin: false,
             },
         );
-        snapshots()
-            .players
-            .store(Arc::new(HashMap::from([(10, owner), (12, stranger)])));
+        snapshots().players.store(Arc::new(FxHashMap::from_iter([
+            (10, owner),
+            (12, stranger),
+        ])));
         snapshots().placed(700, (40, 2, 40), owner.key, "Ann");
         assert!(snapshots().refused_seen(700, Entity(12)), "vanilla Safes");
         assert!(snapshots().may_manage((40, 2, 40), owner, Entity(10)));
